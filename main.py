@@ -152,7 +152,6 @@ if __name__ == "__main__":
 		['powershell.exe', f'.\\{script_dir}\\Enable-Forwarding.ps1', '-InterfaceName', f'"{default_if}"'],
 		stderr=subprocess.STDOUT, stdout=subprocess.PIPE
 	)
-	p.wait()
 	if b"PermissionDenied" in p.communicate()[0]:
 		print("Failed to enable forwarding on network interface")
 		print("Rerun with administrator privileges!")
